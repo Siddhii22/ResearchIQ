@@ -1,0 +1,1 @@
+"""Paper metadata, PDF processing, chunking, and local storage."""

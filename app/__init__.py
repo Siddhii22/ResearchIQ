@@ -1,0 +1,1 @@
+"""ResearchIQ application package."""
