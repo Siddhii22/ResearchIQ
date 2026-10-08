@@ -1,1 +1,1 @@
-"""Future evidence retrieval components."""
+"""Baseline embedding and vector retrieval components."""

@@ -27,6 +27,7 @@ data/papers/*
 !data/papers/.gitkeep
 data/eval/*
 !data/eval/.gitkeep
+data/index/
 
 # Logs and temporary files
 *.log

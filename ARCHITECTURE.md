@@ -58,6 +58,6 @@ Literature Discovery
 
 The agentic workflow is planned for LangGraph. Nodes will represent bounded research steps, and explicit state will carry the question, discovered sources, retrieved evidence, draft, and validation feedback. The critic may request a limited number of revisions; a fixed retry bound prevents an unending loop. The workflow will then either return a verified report or clearly report that the evidence is insufficient.
 
-## Phase 1 Boundary
+## Phase 3 Baseline
 
-Phase 1 implements only the FastAPI application foundation, environment-backed settings, and `GET /health`. Literature search, parsing, retrieval, LLM calls, LangGraph agents, citation checks, report generation, and the frontend are planned work, not current behavior.
+The current baseline embeds Phase 2 chunks with `sentence-transformers/all-MiniLM-L6-v2`, stores normalized vectors in a local FAISS inner-product index, retrieves top-k evidence, and passes that evidence to a configurable OpenAI-compatible chat-completions API. Citation labels are assigned from retrieval order in application code and mapped to the returned source chunks. BM25, hybrid retrieval, RRF, reranking, LangGraph agents, and the frontend remain future work.
