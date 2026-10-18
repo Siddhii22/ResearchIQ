@@ -215,7 +215,7 @@ def get_rag_pipeline() -> RAGPipeline:
     hybrid_retriever = HybridRetriever(
         dense_retriever=dense_retriever,
         bm25_retriever=BM25Retriever(vector_store.chunks),
-        reranker=CrossEncoderReranker(),
+        reranker=None,
         dense_top_k=settings.dense_top_k,
         bm25_top_k=settings.bm25_top_k,
         rrf_k=settings.rrf_k,
