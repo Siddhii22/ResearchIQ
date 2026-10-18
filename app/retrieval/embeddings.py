@@ -1,3 +1,4 @@
+
 """CPU sentence-transformer embeddings for chunks and research queries."""
 
 import logging
@@ -39,6 +40,7 @@ def _load_model(model_name: str):
             type(error).__name__,
         )
         raise
+
     logger.info(
         "research_stage_completed stage=embedding_model_initialization elapsed_seconds=%.3f model=%s",
         perf_counter() - started,
@@ -61,13 +63,18 @@ class SentenceTransformerEmbedder:
 
         vectors = _load_model(self.model_name).encode(
             list(texts),
+            batch_size=16,
             convert_to_numpy=True,
             normalize_embeddings=True,
             show_progress_bar=False,
         )
+
         matrix = np.asarray(vectors, dtype=np.float32)
         if matrix.ndim != 2 or matrix.shape[0] != len(texts):
-            raise ValueError("The embedding model returned an unexpected document vector shape.")
+            raise ValueError(
+                "The embedding model returned an unexpected document vector shape."
+            )
+
         return np.ascontiguousarray(matrix)
 
     def embed_query(self, query: str) -> FloatVector:
