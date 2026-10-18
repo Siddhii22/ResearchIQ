@@ -15,6 +15,10 @@ class LLMRequestError(RuntimeError):
     """The configured LLM endpoint returned an unusable response."""
 
 
+class LLMTimeoutError(LLMRequestError):
+    """The configured LLM endpoint did not respond before its deadline."""
+
+
 class LLMAuthenticationError(LLMRequestError):
     """The provider rejected authentication or account access."""
 
@@ -23,8 +27,15 @@ class LLMQuotaError(LLMRequestError):
     """The provider reported a quota or rate-limit failure."""
 
 
+class LLMProviderUnavailableError(LLMRequestError):
+    """The provider is temporarily unavailable after a retry."""
+
+
 class LLMModelUnavailableError(LLMRequestError):
     """The configured model is unavailable to the provider account."""
+
+
+_GEMINI_REQUEST_TIMEOUT_MILLISECONDS = 30_000
 
 
 class GeminiLLM:
@@ -41,17 +52,32 @@ class GeminiLLM:
                 "GEMINI_API_KEY is not configured; set it in the environment or .env file."
             )
         if self._client is None:
-            self._client = genai.Client(api_key=api_key)
+            self._client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(
+                    timeout=_GEMINI_REQUEST_TIMEOUT_MILLISECONDS,
+                    retry_options=types.HttpRetryOptions(attempts=1),
+                ),
+            )
         return self._client
 
     @staticmethod
-    def _raise_provider_error(error: Exception) -> None:
+    def _provider_status(error: Exception) -> tuple[str, str]:
         status = getattr(error, "code", None)
         if not isinstance(status, (int, str)):
             status = getattr(error, "status_code", None)
         status_name = str(getattr(error, "status", "")).upper()
         status_value = str(status).upper()
+        return status_value, status_name
 
+    @classmethod
+    def _raise_provider_error(cls, error: Exception) -> None:
+        status_value, status_name = cls._provider_status(error)
+
+        if status_value == "503" or status_name == "UNAVAILABLE":
+            raise LLMProviderUnavailableError(
+                "Gemini is temporarily unavailable. Please try again shortly."
+            ) from error
         if status_value in {"401", "403"} or status_name in {
             "UNAUTHENTICATED",
             "PERMISSION_DENIED",
@@ -67,16 +93,17 @@ class GeminiLLM:
             raise LLMModelUnavailableError(
                 "The configured Gemini model is unavailable or not enabled for this project."
             ) from error
-        if isinstance(error, (TimeoutError, httpx.TimeoutException)):
-            raise LLMRequestError("The Gemini request timed out.") from error
+        if status_value in {"408", "504"} or isinstance(error, (TimeoutError, httpx.TimeoutException)):
+            raise LLMTimeoutError("The Gemini request timed out.") from error
         if isinstance(error, httpx.RequestError):
             raise LLMRequestError("Could not reach the Gemini provider.") from error
         raise LLMRequestError("The Gemini provider request failed.") from error
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
         client = self._get_client()
-        try:
-            response = client.models.generate_content(
+
+        def generate_content():
+            return client.models.generate_content(
                 model=self.configuration.gemini_model,
                 contents=user_prompt,
                 config=types.GenerateContentConfig(
@@ -84,6 +111,9 @@ class GeminiLLM:
                     temperature=0.2,
                 ),
             )
+
+        try:
+            response = generate_content()
         except Exception as error:
             self._raise_provider_error(error)
 
@@ -136,7 +166,7 @@ class OpenAICompatibleLLM:
                 f"OpenAI-compatible provider returned HTTP {error.response.status_code}."
             ) from error
         except httpx.TimeoutException as error:
-            raise LLMRequestError("The OpenAI-compatible provider request timed out.") from error
+            raise LLMTimeoutError("The OpenAI-compatible provider request timed out.") from error
         except httpx.HTTPError as error:
             raise LLMRequestError("Could not reach the OpenAI-compatible provider.") from error
         except (ValueError, KeyError, IndexError, TypeError) as error:

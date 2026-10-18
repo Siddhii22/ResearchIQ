@@ -62,3 +62,37 @@ def build_index(
     store.add(vectors, chunks)
     store.save(index_path)
     return store.count
+
+
+def append_processed_chunks(
+    papers_dir: Path = Path("data/papers"),
+    index_path: Path = DEFAULT_INDEX_PATH,
+    embedder: EmbeddingModel | None = None,
+) -> int:
+    """Append only chunks that are not already represented in the local FAISS index."""
+    chunks = load_processed_chunks(papers_dir)
+    try:
+        store = FaissVectorStore.load(index_path)
+    except FileNotFoundError:
+        return build_index(papers_dir, index_path, embedder)
+
+    indexed_keys = {
+        (str(chunk.get("paper_id", "")), str(chunk.get("chunk_id", "")))
+        for chunk in store.chunks
+    }
+    new_chunks = [
+        chunk
+        for chunk in chunks
+        if (str(chunk["paper_id"]), str(chunk["chunk_id"])) not in indexed_keys
+    ]
+    if not new_chunks:
+        return store.count
+
+    embedding_service = embedder or SentenceTransformerEmbedder()
+    vectors = embedding_service.embed_documents([chunk["text"] for chunk in new_chunks])
+    if vectors.ndim != 2 or vectors.shape[0] != len(new_chunks):
+        raise ValueError("The embedding service returned an unexpected vector matrix.")
+
+    store.add(vectors, new_chunks)
+    store.save(index_path)
+    return store.count

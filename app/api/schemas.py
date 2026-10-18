@@ -22,6 +22,7 @@ class ResearchSourceResponse(BaseModel):
     citation_id: str
     chunk_id: str
     paper_id: str
+    paper_url: str | None = None
     title: str
     authors: list[str]
     section: str

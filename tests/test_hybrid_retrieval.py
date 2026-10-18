@@ -19,11 +19,13 @@ def make_chunk(
     *,
     page: int = 1,
     section: str = "Introduction",
+    paper_id: str = "1706.03762v7",
+    title: str = "Attention Is All You Need",
 ) -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id=chunk_id,
-        paper_id="1706.03762v7",
-        title="Attention Is All You Need",
+        paper_id=paper_id,
+        title=title,
         authors=["Ashish Vaswani", "Noam Shazeer"],
         section=section,
         page=page,
@@ -135,6 +137,23 @@ def test_rrf_uses_one_based_ranks_and_deduplicates_by_chunk_id() -> None:
     assert fused[0].chunk.text == "Dense first"
 
 
+def test_rrf_keeps_same_chunk_id_from_different_papers_separate() -> None:
+    first = make_chunk("shared", "Evidence from paper one.")
+    second = make_chunk(
+        "shared",
+        "Evidence from paper two.",
+        paper_id="2401.12345v1",
+        title="A Different Research Paper",
+    )
+
+    fused = reciprocal_rank_fusion([[first], [second]])
+
+    assert [(item.chunk.paper_id, item.chunk.title) for item in fused] == [
+        ("1706.03762v7", "Attention Is All You Need"),
+        ("2401.12345v1", "A Different Research Paper"),
+    ]
+
+
 def test_rrf_ties_preserve_first_seen_order_and_validate_k() -> None:
     fused = reciprocal_rank_fusion(
         [[make_chunk("first", "x"), make_chunk("second", "x")]],
@@ -184,6 +203,67 @@ def test_hybrid_pipeline_limits_candidates_reranks_and_preserves_sources() -> No
     assert results[0].section == "Methods"
     assert results[0].page == 4
     assert results[0].text == chunks[1].text
+
+
+def test_hybrid_prefers_distinct_papers_before_returning_more_chunks() -> None:
+    chunks = [
+        make_chunk("paper-a-1", "attention evidence one"),
+        make_chunk("paper-a-2", "attention evidence two", page=2),
+        make_chunk(
+            "paper-b-1",
+            "attention evidence three",
+            paper_id="2401.12345v1",
+            title="A Different Research Paper",
+        ),
+    ]
+    dense = FakeDenseRetriever(chunks)
+    bm25 = FakeDenseRetriever(chunks)
+    reranker = FakeReranker([0.9, 0.8, 0.7])
+    retriever = HybridRetriever(
+        dense,
+        bm25,
+        reranker,
+        dense_top_k=3,
+        bm25_top_k=3,
+        rerank_top_k=3,
+        final_top_k=3,
+    )
+
+    results = retriever.retrieve("attention", top_k=3)
+
+    assert [chunk.chunk_id for chunk in results] == ["paper-a-1", "paper-b-1", "paper-a-2"]
+    assert [chunk.paper_id for chunk in results] == [
+        "1706.03762v7",
+        "2401.12345v1",
+        "1706.03762v7",
+    ]
+
+
+def test_hybrid_does_not_promote_a_low_relevance_distinct_paper() -> None:
+    chunks = [
+        make_chunk("relevant-1", "Flood causes include rainfall and river overflow."),
+        make_chunk("relevant-2", "Monsoon rainfall contributes to flooding.", page=2),
+        make_chunk(
+            "irrelevant-1",
+            "Library URLs and digital collections in North East India.",
+            paper_id="2210.00203v1",
+            title="Digital Library Initiatives in North East India: A Survey",
+        ),
+    ]
+    retriever = HybridRetriever(
+        FakeDenseRetriever(chunks),
+        FakeDenseRetriever(chunks),
+        FakeReranker({"relevant-1": 4.5, "relevant-2": 1.2, "irrelevant-1": -9.9}),
+        dense_top_k=3,
+        bm25_top_k=3,
+        rerank_top_k=3,
+        final_top_k=2,
+    )
+
+    results = retriever.retrieve("what causes floods in assam frequently", top_k=2)
+
+    assert [chunk.chunk_id for chunk in results] == ["relevant-1", "relevant-2"]
+    assert all(chunk.paper_id == "1706.03762v7" for chunk in results)
 
 
 def test_cross_encoder_model_load_is_lazy_and_cpu_bound(monkeypatch: pytest.MonkeyPatch) -> None:

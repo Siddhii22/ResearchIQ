@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import httpx
 import pytest
 
 from app.config import Settings
@@ -11,8 +12,10 @@ from app.services.llm_service import (
     LLMAuthenticationError,
     LLMConfigurationError,
     LLMModelUnavailableError,
+    LLMProviderUnavailableError,
     LLMQuotaError,
     LLMRequestError,
+    LLMTimeoutError,
     OpenAICompatibleLLM,
     create_llm_service,
 )
@@ -40,7 +43,10 @@ def test_gemini_uses_official_sdk_and_shared_string_interface(monkeypatch: pytes
     result = llm.generate("Evidence-only system prompt", "Research question")
 
     assert result == "Generated text."
-    client_factory.assert_called_once_with(api_key="mocked-test-key")
+    client_factory.assert_called_once()
+    http_options = client_factory.call_args.kwargs["http_options"]
+    assert http_options.timeout == 30_000
+    assert http_options.retry_options.attempts == 1
     models.generate_content.assert_called_once()
     arguments = models.generate_content.call_args.kwargs
     assert arguments["model"] == "gemini-3.8-flash"
@@ -80,7 +86,7 @@ def test_gemini_requires_key_before_client_creation(monkeypatch: pytest.MonkeyPa
         (403, LLMAuthenticationError, "Gemini authentication failed"),
         (429, LLMQuotaError, "quota or rate limit exceeded"),
         (404, LLMModelUnavailableError, "model is unavailable"),
-        (503, LLMRequestError, "Gemini provider request failed"),
+        (503, LLMProviderUnavailableError, "Gemini is temporarily unavailable"),
     ],
 )
 def test_gemini_maps_provider_errors_without_leaking_details(
@@ -105,6 +111,39 @@ def test_gemini_maps_provider_errors_without_leaking_details(
     assert secret_like_provider_text not in str(error.value)
 
 
+def test_gemini_does_not_retry_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider_error = RuntimeError("temporary failure")
+    provider_error.code = 503
+    models = Mock()
+    models.generate_content.side_effect = provider_error
+    monkeypatch.setattr(
+        "app.services.llm_service.genai.Client",
+        Mock(return_value=SimpleNamespace(models=models)),
+    )
+
+    with pytest.raises(LLMProviderUnavailableError) as error:
+        GeminiLLM(gemini_settings()).generate("system", "user")
+
+    models.generate_content.assert_called_once()
+    assert error.value.__cause__ is provider_error
+    assert "temporary failure" not in str(error.value)
+
+
+def test_gemini_does_not_retry_429(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider_error = RuntimeError("quota details")
+    provider_error.code = 429
+    models = Mock()
+    models.generate_content.side_effect = provider_error
+    monkeypatch.setattr(
+        "app.services.llm_service.genai.Client",
+        Mock(return_value=SimpleNamespace(models=models)),
+    )
+    with pytest.raises(LLMQuotaError):
+        GeminiLLM(gemini_settings()).generate("system", "user")
+
+    models.generate_content.assert_called_once()
+
+
 def test_gemini_empty_text_is_an_explicit_provider_error(monkeypatch: pytest.MonkeyPatch) -> None:
     models = Mock()
     models.generate_content.return_value = SimpleNamespace(text=" ")
@@ -114,6 +153,18 @@ def test_gemini_empty_text_is_an_explicit_provider_error(monkeypatch: pytest.Mon
     )
 
     with pytest.raises(LLMRequestError, match="Gemini returned an empty answer"):
+        GeminiLLM(gemini_settings()).generate("system", "user")
+
+
+def test_gemini_timeout_maps_to_timeout_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    models = Mock()
+    models.generate_content.side_effect = httpx.ReadTimeout("provider timeout")
+    monkeypatch.setattr(
+        "app.services.llm_service.genai.Client",
+        Mock(return_value=SimpleNamespace(models=models)),
+    )
+
+    with pytest.raises(LLMTimeoutError, match="Gemini request timed out"):
         GeminiLLM(gemini_settings()).generate("system", "user")
 
 

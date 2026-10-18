@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Iterator
 
@@ -10,9 +11,14 @@ import pytest
 
 from app.ingestion.chunking import chunk_paper
 from app.ingestion.errors import PDFDownloadError
+from app.ingestion import paper_service
 from app.ingestion.models import ExtractedPage, PaperMetadata
-from app.ingestion.paper_service import fetch_paper_metadata, normalize_arxiv_id
-from app.ingestion.pdf_downloader import download_pdf
+from app.ingestion.paper_service import (
+    fetch_paper_metadata,
+    normalize_arxiv_id,
+    search_arxiv_papers,
+)
+from app.ingestion.pdf_downloader import _MAX_PDF_BYTES, download_pdf
 from app.ingestion.storage import pdf_path_for, processed_path_for
 
 ATOM_RESPONSE = """<?xml version="1.0" encoding="UTF-8"?>
@@ -130,6 +136,59 @@ def test_pdf_download_reports_http_failure_and_cleans_partial_file(
     assert not list(tmp_path.glob("*.part"))
 
 
+def test_pdf_download_rejects_non_arxiv_urls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    metadata = replace(sample_metadata(), pdf_url="http://127.0.0.1/private.pdf")
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Unsafe URLs must not be requested.")),
+    )
+
+    with pytest.raises(PDFDownloadError, match="unsafe PDF URL"):
+        download_pdf(metadata, tmp_path)
+
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_pdf_download_rejects_oversized_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @contextmanager
+    def oversized_stream(*args: object, **kwargs: object) -> Iterator[httpx.Response]:
+        request = httpx.Request("GET", "https://arxiv.org/pdf/2401.12345")
+        yield httpx.Response(200, headers={"content-length": str(_MAX_PDF_BYTES + 1)}, request=request)
+
+    monkeypatch.setattr(httpx, "stream", oversized_stream)
+
+    with pytest.raises(PDFDownloadError, match="size limit"):
+        download_pdf(sample_metadata(), tmp_path)
+
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_pdf_download_total_deadline_cleans_partial_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [100.0]
+
+    @contextmanager
+    def slow_stream(*args: object, **kwargs: object) -> Iterator[httpx.Response]:
+        clock[0] = 146.0
+        request = httpx.Request("GET", "https://arxiv.org/pdf/2401.12345")
+        yield httpx.Response(200, content=b"pdf bytes", request=request)
+
+    monkeypatch.setattr("app.ingestion.pdf_downloader.monotonic", lambda: clock[0])
+    monkeypatch.setattr(httpx, "stream", slow_stream)
+
+    with pytest.raises(PDFDownloadError, match="timed out") as error:
+        download_pdf(sample_metadata(), tmp_path)
+
+    assert isinstance(error.value.__cause__, TimeoutError)
+    assert not list(tmp_path.glob("*.part"))
+
+
 def test_chunking_preserves_detected_sections_and_page_metadata() -> None:
     metadata = sample_metadata()
     pages = [
@@ -169,6 +228,63 @@ def test_chunking_falls_back_to_page_paragraphs() -> None:
     assert chunks[0].page == 1
     assert "A useful first paragraph." in chunks[0].text
     assert "A second paragraph." in chunks[0].text
+
+
+def test_search_arxiv_papers_parses_multiple_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    search_response = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <entry>
+    <id>https://arxiv.org/abs/2401.10000v1</id>
+    <updated>2024-01-03T10:00:00Z</updated>
+    <published>2024-01-02T09:00:00Z</published>
+    <title>Attention Is Useful</title>
+    <summary>How attention helps retrieval.</summary>
+    <author><name>Ada Lovelace</name></author>
+    <link href="https://arxiv.org/pdf/2401.10000v1.pdf" rel="related" title="pdf" />
+    <category term="cs.CL" />
+  </entry>
+  <entry>
+    <id>https://arxiv.org/abs/2401.20000v2</id>
+    <updated>2024-01-05T10:00:00Z</updated>
+    <published>2024-01-04T09:00:00Z</published>
+    <title>Retrieval with Context</title>
+    <summary>Context improves document retrieval.</summary>
+    <author><name>Alan Turing</name></author>
+    <link href="https://arxiv.org/pdf/2401.20000v2.pdf" rel="related" title="pdf" />
+    <category term="cs.IR" />
+  </entry>
+</feed>
+"""
+
+    def fake_get(url: str, **kwargs: object) -> httpx.Response:
+        assert url == "https://export.arxiv.org/api/query"
+        assert kwargs["params"]["search_query"] == "all:attention retrieval"
+        return httpx.Response(200, text=search_response, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    results = search_arxiv_papers("attention retrieval", max_results=2)
+
+    assert [paper.arxiv_id for paper in results] == ["2401.10000v1", "2401.20000v2"]
+    assert results[0].title == "Attention Is Useful"
+    assert results[1].authors == ["Alan Turing"]
+
+
+def test_arxiv_api_requests_are_paced(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [100.0]
+    sleeps: list[float] = []
+    monkeypatch.setattr(paper_service, "_last_arxiv_api_request_at", None)
+    monkeypatch.setattr(paper_service.time, "monotonic", lambda: clock[0])
+
+    def advance_clock(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(paper_service.time, "sleep", advance_clock)
+    paper_service._wait_for_arxiv_api_slot()
+    clock[0] += 1.0
+    paper_service._wait_for_arxiv_api_slot()
+
+    assert sleeps == [2.0]
 
 
 def test_long_paragraph_is_split_at_sentence_boundaries() -> None:

@@ -1,11 +1,37 @@
 """Dense plus BM25 retrieval with RRF fusion and cross-encoder reranking."""
 
+import logging
 from dataclasses import dataclass, replace
-from typing import Protocol, Sequence
+from time import perf_counter
+from typing import Callable, Protocol, Sequence, TypeVar
 
 from app.retrieval.bm25_retriever import BM25Retriever
 from app.retrieval.reranker import ChunkReranker, CrossEncoderReranker
 from app.retrieval.retriever import RetrievedChunk
+
+logger = logging.getLogger(__name__)
+_Result = TypeVar("_Result")
+RERANKER_RELEVANCE_THRESHOLD = 0.0
+
+
+def _run_timed_stage(stage: str, operation: Callable[[], _Result]) -> _Result:
+    started = perf_counter()
+    try:
+        result = operation()
+    except Exception as error:
+        logger.warning(
+            "research_stage_failed stage=%s elapsed_seconds=%.3f error_type=%s",
+            stage,
+            perf_counter() - started,
+            type(error).__name__,
+        )
+        raise
+    logger.info(
+        "research_stage_completed stage=%s elapsed_seconds=%.3f",
+        stage,
+        perf_counter() - started,
+    )
+    return result
 
 
 class RankedRetriever(Protocol):
@@ -27,17 +53,18 @@ def reciprocal_rank_fusion(
     if k < 1:
         raise ValueError("RRF k must be at least 1.")
 
-    fused: dict[str, tuple[RetrievedChunk, float, int]] = {}
+    fused: dict[tuple[str, str], tuple[RetrievedChunk, float, int]] = {}
     next_order = 0
     for ranked_list in ranked_lists:
         for rank, chunk in enumerate(ranked_list, start=1):
-            current = fused.get(chunk.chunk_id)
+            source_key = (chunk.paper_id, chunk.chunk_id)
+            current = fused.get(source_key)
             if current is None:
-                fused[chunk.chunk_id] = (chunk, 1.0 / (k + rank), next_order)
+                fused[source_key] = (chunk, 1.0 / (k + rank), next_order)
                 next_order += 1
             else:
                 original_chunk, score, order = current
-                fused[chunk.chunk_id] = (original_chunk, score + 1.0 / (k + rank), order)
+                fused[source_key] = (original_chunk, score + 1.0 / (k + rank), order)
 
     ordered = sorted(fused.values(), key=lambda item: (-item[1], item[2]))
     return [FusedChunk(chunk=chunk, rrf_score=score) for chunk, score, _ in ordered]
@@ -78,14 +105,23 @@ class HybridRetriever:
         if final_count < 1:
             raise ValueError("top_k must be at least 1.")
 
-        dense_results = self.dense_retriever.retrieve(query, top_k=self.dense_top_k)
-        lexical_results = self.bm25_retriever.retrieve(query, top_k=self.bm25_top_k)
+        dense_results = _run_timed_stage(
+            "dense_retrieval",
+            lambda: self.dense_retriever.retrieve(query, top_k=self.dense_top_k),
+        )
+        lexical_results = _run_timed_stage(
+            "bm25_retrieval",
+            lambda: self.bm25_retriever.retrieve(query, top_k=self.bm25_top_k),
+        )
         fused = reciprocal_rank_fusion([dense_results, lexical_results], k=self.rrf_k)
         candidates = fused[: self.rerank_top_k]
         if not candidates:
             return []
 
-        scores = self.reranker.score(query, [candidate.chunk for candidate in candidates])
+        scores = _run_timed_stage(
+            "cross_encoder_reranking",
+            lambda: self.reranker.score(query, [candidate.chunk for candidate in candidates]),
+        )
         if len(scores) != len(candidates):
             raise ValueError("Reranker must return one score per candidate chunk.")
 
@@ -93,11 +129,29 @@ class HybridRetriever:
             zip(candidates, scores, strict=True),
             key=lambda item: (-float(item[1]), -item[0].rrf_score),
         )
+        relevant = [
+            (candidate, float(score))
+            for candidate, score in reranked
+            if float(score) > RERANKER_RELEVANCE_THRESHOLD
+        ]
+        if not relevant:
+            return []
+
+        diverse: list[tuple[FusedChunk, float]] = []
+        remaining: list[tuple[FusedChunk, float]] = []
+        seen_papers: set[str] = set()
+        for candidate, score in relevant:
+            if candidate.chunk.paper_id in seen_papers:
+                remaining.append((candidate, score))
+                continue
+            seen_papers.add(candidate.chunk.paper_id)
+            diverse.append((candidate, score))
+        selected = (diverse + remaining)[:final_count]
         return [
             replace(
                 candidate.chunk,
                 retrieval_score=float(score),
                 retrieval_method="hybrid_rrf_reranked",
             )
-            for candidate, score in reranked[:final_count]
+            for candidate, score in selected
         ]

@@ -1,12 +1,16 @@
 """Lazy CPU cross-encoder scoring for retrieved chunk candidates."""
 
+import logging
 from functools import lru_cache
+from time import perf_counter
 from typing import Protocol, Sequence
 
 import numpy as np
 
 from app.config import settings
 from app.retrieval.retriever import RetrievedChunk
+
+logger = logging.getLogger(__name__)
 
 
 class ChunkReranker(Protocol):
@@ -18,7 +22,21 @@ class ChunkReranker(Protocol):
 def _load_cross_encoder(model_name: str):
     from sentence_transformers import CrossEncoder
 
-    return CrossEncoder(model_name, device="cpu")
+    started = perf_counter()
+    try:
+        model = CrossEncoder(model_name, device="cpu")
+    except Exception as error:
+        logger.warning(
+            "research_stage_failed stage=reranker_model_initialization error_type=%s",
+            type(error).__name__,
+        )
+        raise
+    logger.info(
+        "research_stage_completed stage=reranker_model_initialization elapsed_seconds=%.3f model=%s",
+        perf_counter() - started,
+        model_name,
+    )
+    return model
 
 
 class CrossEncoderReranker:

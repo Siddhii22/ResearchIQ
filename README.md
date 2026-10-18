@@ -1,45 +1,20 @@
 # ResearchIQ
 
-## Overview
-ResearchIQ is an evidence-driven AI research assistant project. Its goal is to help users move from a research question to a structured report whose claims can be traced to relevant literature.
+ResearchIQ is an evidence-driven research assistant demo. It searches arXiv, retrieves passages from processed papers, and asks a configured language model to draft an answer grounded in those passages. The Streamlit interface displays the answer alongside cited evidence, source metadata, and a link to each arXiv abstract page.
 
-## Problem
-Reliable AI-assisted research requires more than generating fluent text. Relevant literature must be discovered and organized, evidence must be retrieved from the source material, citations must support the claims they accompany, and unsupported statements must be caught before a report is presented. Without these checks, a language model can omit important work, cite irrelevant sources, or hallucinate details.
+## How It Works
 
-## Planned Architecture
-The planned pipeline starts with a research question and literature discovery, ingests papers, and divides them into structure-aware chunks. The current baseline uses dense vector retrieval; later versions can add lexical retrieval, rank fusion, reranking, and a critic that identifies gaps and requests bounded revisions. The LangGraph workflow, hybrid retrieval, and automated citation verification remain future work.
+1. FastAPI turns the question into an arXiv metadata search. The API request is paced to no more than one arXiv API request per three seconds per process.
+2. Missing search results may be downloaded and processed locally into page-aware chunks. Cached papers are reused.
+3. Dense FAISS retrieval and BM25 are combined with reciprocal-rank fusion and a cross-encoder reranker.
+4. The question and retrieved passages are sent to the configured LLM provider. The model is instructed to use the evidence as untrusted source material, not as executable instructions.
+5. The response includes evidence passages, page/section details, bibliographic metadata, and a canonical arXiv abstract URL.
 
-## Tech Stack
-**Implemented:** Python, FastAPI, Uvicorn, python-dotenv, HTTPX, pytest, pypdf, sentence-transformers, NumPy, FAISS CPU, and the official `google-genai` SDK. Phase 2 uses the arXiv Atom API and PDF text extraction. Phase 3 uses `sentence-transformers/all-MiniLM-L6-v2`, a local FAISS index, and Gemini text generation by default. Phase 4 combines local BM25, RRF, and `cross-encoder/ms-marco-MiniLM-L-6-v2`; an OpenAI-compatible LLM provider remains optional.
-
-**Planned for later phases:** BM25 for lexical retrieval, hybrid retrieval, Reciprocal Rank Fusion (RRF), a cross-encoder reranker, and LangGraph for the bounded agent workflow. These components are not installed or active yet.
-
-## Current Status
-Phase 4 — Hybrid retrieval. The project can retrieve evidence through dense FAISS and BM25, fuse rankings with configurable RRF, and rerank candidates with a lazy CPU cross-encoder before grounded generation. No formal retrieval evaluation, agent workflow, or frontend is implemented.
-
-## Project Structure
-```text
-app/
-  api/          HTTP routes
-  agents/       Reserved for later agent workflow
-  ingestion/    arXiv metadata, PDF processing, chunking, and JSON storage
-  retrieval/    MiniLM embeddings, FAISS, BM25, RRF, and cross-encoder reranking
-  evaluation/   Reserved for later evaluation tools
-  models/       Reserved for later application models
-  services/     Configurable LLM client and RAG orchestration
-  utils/        Reserved for shared utilities
-  config.py     Environment-backed settings
-  main.py       FastAPI application
-data/
-  papers/       Local paper data (ignored by Git)
-  eval/         Local evaluation data (ignored by Git)
-tests/          Automated tests
-frontend/       Reserved; no UI is implemented yet
-scripts/        Ingestion and vector-index build scripts
-```
+The optional LangGraph workflow is available through `scripts/run_agentic_research.py`. Evaluation tools and the UI's local benchmark are separate from live query results; the current displayed benchmark is a 12-question, single-paper evaluation and is not a general performance guarantee.
 
 ## Setup
-Use Python 3.10 or newer. From the project root, create and activate a virtual environment in PowerShell:
+
+Use Python 3.10 or newer. In PowerShell, from the repository root:
 
 ```powershell
 py -m venv .venv
@@ -49,67 +24,63 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-The `.env` file is optional for the health endpoint and ingestion pipeline. `APP_NAME` sets the API title. Set `LLM_PROVIDER=gemini`, `GEMINI_API_KEY`, and `GEMINI_MODEL` in `.env` for Gemini generation. No credentials are included in the repository.
+Put credentials only in `.env` or deployment secrets. For Gemini, configure `LLM_PROVIDER=gemini`, `GEMINI_API_KEY`, and optionally `GEMINI_MODEL`. The optional OpenAI-compatible provider uses `LLM_PROVIDER=openai_compatible`, `LLM_API_KEY`, `LLM_API_BASE_URL`, and `LLM_MODEL`. The frontend receives only the API URL; provider keys belong only in the backend environment. Do not commit `.env` or deployment secrets.
 
-## Running Locally
-With the virtual environment active, start the API from the project root:
+## Run Locally
 
-```powershell
-uvicorn app.main:app --reload
-```
-
-The health endpoint is available at `http://127.0.0.1:8000/health`. To run the API with Docker Compose, first create `.env` from `.env.example`, then run `docker compose up --build`.
-
-To ingest an arXiv paper, run this from the project root:
+Start the API in one terminal:
 
 ```powershell
-python scripts/ingest_paper.py 2401.12345
+\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-The script writes the cached PDF and processed JSON under `data/papers/`. It does not require an API key.
-
-Build or refresh the local vector index from processed paper JSON (this downloads the configured embedding model the first time):
+Start Streamlit in another:
 
 ```powershell
-python scripts/build_index.py
+$env:RESEARCHIQ_API_URL = "http://127.0.0.1:8000"
+\.venv\Scripts\python.exe -m streamlit run frontend\app.py
 ```
 
-The FAISS index and chunk metadata are stored under `data/index/` and are ignored by Git.
+The UI is at `http://localhost:8501`; API health is at `http://127.0.0.1:8000/health`. `docker compose up --build` starts both services. Compose exposes the UI on port 8501 and binds the API host port to loopback.
 
-The research query endpoint now uses hybrid retrieval. Configure `DENSE_TOP_K`, `BM25_TOP_K`, `RRF_K`, `RERANK_TOP_K`, `FINAL_TOP_K`, and `RERANK_MODEL` in `.env` to adjust the pipeline. The first query that reaches reranking downloads the cross-encoder model if it is not cached.
-
-Compare dense-only, BM25-only, RRF, and RRF plus reranking using the same query:
+The API can discover and ingest papers during a research request. To ingest a paper manually, first review the paper's current reuse license and arXiv terms, then run:
 
 ```powershell
-python scripts/compare_retrieval.py "What is the main contribution of the Transformer architecture?"
+\.venv\Scripts\python.exe scripts\ingest_paper.py 2401.12345
+\.venv\Scripts\python.exe scripts\build_index.py
 ```
 
-This reports ranked chunk IDs and scores only; it does not calculate retrieval accuracy metrics.
+The retrieval settings `DENSE_TOP_K`, `BM25_TOP_K`, `RRF_K`, `RERANK_TOP_K`, `FINAL_TOP_K`, and `RERANK_MODEL` are read from environment variables. The embedding and reranker models are downloaded from Hugging Face when first needed.
 
-To verify Gemini configuration and model access with one short request, run:
+## Data, Privacy, and Security
+
+- There is no user-file upload feature or API route for arbitrary local paths. Questions are limited to 4,000 characters, request bodies to 16 KiB, and the research endpoint to 10 requests per minute per observed client address in one API process.
+- Application code does not intentionally persist research questions or generated answers. Streamlit keeps the current form/result in its session state while the session is active. Hosting, proxy, and provider logs/retention are outside this application's control.
+- The question's search terms are sent to arXiv. The full question and retrieved evidence excerpts are sent to the configured LLM provider for generation. Review that provider's terms, data controls, and retention policy before using sensitive queries. The app does not send uploaded documents because uploads are not supported.
+- Downloaded PDFs, extracted page text/chunks, and the FAISS metadata index are stored under local `data/` directories. They are excluded from Git and the Docker build context, and no endpoint serves these directories or full PDF files. Retrieved evidence excerpts are returned to the requesting user. Paper caches are shared by the one demo backend process; this is a public-paper cache, not a per-user store.
+- The in-memory rate limiter is per process and uses the socket peer address. Behind a reverse proxy, the API may see the proxy address for every visitor; configure a trusted gateway limit for a public deployment. Do not trust arbitrary client-supplied forwarded-IP headers. Multi-replica deployments need a shared limiter.
+- Do not expose the API port publicly without a trusted TLS reverse proxy and deployment-level abuse controls. Keep model credentials in backend secrets, use a restricted provider key/quota, and monitor expected usage.
+
+## Paper Rights and Attribution
+
+arXiv metadata and paper content have different terms. arXiv states that descriptive metadata may be used under CC0, while the paper's copyright and submitted license control content reuse. Its API terms say not to store and serve papers unless the rights holder's permission or the paper's license permits it, and ask API clients to make no more than one legacy API request every three seconds. See the [arXiv API terms](https://info.arxiv.org/help/api/tou.html), [license overview](https://info.arxiv.org/help/license/index.html), and [bulk-data guidance](https://info.arxiv.org/help/bulk_data.html).
+
+ResearchIQ links citations to the original arXiv abstract page and does not provide a PDF-download endpoint. It does cache PDFs and extracted text locally for retrieval and returns selected evidence excerpts. A public operator must review the exact license and applicable terms for every paper and determine whether that processing, storage, and excerpt display are permitted. Public accessibility alone is not permission to redistribute. This repository does not include the local paper cache, evaluation data, or FAISS index. The default example, “Attention Is All You Need” by Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin, is [arXiv:1706.03762](https://arxiv.org/abs/1706.03762); its current page displays the [arXiv non-exclusive distribution license](https://arxiv.org/licenses/nonexclusive-distrib/1.0/), which is not by itself a redistribution grant to this project.
+
+Answers are AI-generated and may be incomplete, inaccurate, or incorrectly interpret a cited passage. Verify important claims against the original paper. ResearchIQ is a research aid, not a guarantee of factual accuracy or legal compliance.
+
+## Dependencies and Licenses
+
+The runtime includes FastAPI, Uvicorn, HTTPX, python-dotenv, pypdf, NumPy, FAISS CPU, sentence-transformers, `google-genai`, LangGraph, and Streamlit. Tests use pytest. arXiv is the scholarly metadata/content service; Hugging Face hosts the configured models; Gemini is the default generation provider.
+
+The following direct dependency/model license declarations were spot-checked against upstream license files or model cards: FastAPI (MIT), Uvicorn (BSD-3-Clause), pypdf (BSD-style), NumPy (BSD-3-Clause), FAISS (MIT), Streamlit (Apache-2.0), Google Gen AI SDK (Apache-2.0), LangGraph (MIT), `all-MiniLM-L6-v2` (Apache-2.0), and `ms-marco-MiniLM-L-6-v2` (Apache-2.0). Review each project's current license, notices, model-card terms, and all transitive dependencies before redistribution or commercial deployment; this spot check is not a compatibility determination. `requirements.txt` uses version ranges and no lock file is included. A vulnerability database scan was not available in this environment (`pip-audit` is not installed).
+
+No project-level `LICENSE` file is currently included. The rights to reuse this repository's own code have therefore not been granted by a project license; choose a license only after confirming authorship and ownership.
+
+## Evaluation and Tests
+
+Local evaluation data and results are ignored by Git. When available, the UI displays K=5 metrics from the saved 12-question *Attention Is All You Need* evaluation only. To run tests:
 
 ```powershell
-python scripts/check_gemini.py
+\.venv\Scripts\python.exe -m pytest -q
 ```
-
-The diagnostic prints only key-presence and sanitized success/failure status, never the key or provider response. To use the optional OpenAI-compatible API instead, set `LLM_PROVIDER=openai_compatible`, `LLM_API_KEY`, `LLM_API_BASE_URL`, and `LLM_MODEL`. Without the selected provider's key, `/api/v1/research/query` returns HTTP 503 rather than a fabricated answer.
-
-Example request:
-
-```powershell
-$body = @{ question = "What is the main contribution of the Transformer architecture?"; top_k = 5 } | ConvertTo-Json
-Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/research/query" -Method Post -ContentType "application/json" -Body $body
-```
-
-## Testing
-Run the test suite from the project root:
-
-```powershell
-pytest
-```
-
-## Future Roadmap
-1. Add BM25 and hybrid retrieval, then rank fusion and cross-encoder reranking.
-2. Improve citation verification and evidence quality checks.
-3. Implement the bounded critic-and-revision workflow with LangGraph.
-4. Add evaluation datasets and a professional research-workspace UI.

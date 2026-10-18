@@ -1,6 +1,8 @@
 """CPU sentence-transformer embeddings for chunks and research queries."""
 
+import logging
 from functools import lru_cache
+from time import perf_counter
 from typing import Protocol, Sequence
 
 import numpy as np
@@ -9,6 +11,7 @@ from numpy.typing import NDArray
 from app.config import settings
 
 FloatVector = NDArray[np.float32]
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingModel(Protocol):
@@ -27,7 +30,21 @@ class EmbeddingModel(Protocol):
 def _load_model(model_name: str):
     from sentence_transformers import SentenceTransformer
 
-    return SentenceTransformer(model_name, device="cpu")
+    started = perf_counter()
+    try:
+        model = SentenceTransformer(model_name, device="cpu")
+    except Exception as error:
+        logger.warning(
+            "research_stage_failed stage=embedding_model_initialization error_type=%s",
+            type(error).__name__,
+        )
+        raise
+    logger.info(
+        "research_stage_completed stage=embedding_model_initialization elapsed_seconds=%.3f model=%s",
+        perf_counter() - started,
+        model_name,
+    )
+    return model
 
 
 class SentenceTransformerEmbedder:

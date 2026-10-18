@@ -16,6 +16,12 @@ ENV/
 .env
 .env.*
 !.env.example
+.streamlit/secrets.toml
+secrets.toml
+credentials*.json
+service-account*.json
+*.pem
+*.key
 
 # IDE and editor files
 .idea/

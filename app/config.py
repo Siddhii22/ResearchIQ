@@ -28,6 +28,7 @@ class Settings:
     rrf_k: int = int(os.getenv("RRF_K", "60"))
     rerank_top_k: int = int(os.getenv("RERANK_TOP_K", "20"))
     final_top_k: int = int(os.getenv("FINAL_TOP_K", "5"))
+    arxiv_search_limit: int = int(os.getenv("ARXIV_SEARCH_LIMIT", "5"))
     rerank_model: str = os.getenv(
         "RERANK_MODEL",
         "cross-encoder/ms-marco-MiniLM-L-6-v2",
