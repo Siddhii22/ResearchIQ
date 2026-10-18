@@ -14,6 +14,8 @@ from app.config import settings
 FloatVector = NDArray[np.float32]
 logger = logging.getLogger(__name__)
 
+EMBEDDING_BATCH_SIZE = 1
+
 
 class EmbeddingModel(Protocol):
     """Interface shared by the index builder and retriever."""
@@ -27,7 +29,7 @@ class EmbeddingModel(Protocol):
         ...
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=1)
 def _load_model(model_name: str):
     from sentence_transformers import SentenceTransformer
 
@@ -42,7 +44,8 @@ def _load_model(model_name: str):
         raise
 
     logger.info(
-        "research_stage_completed stage=embedding_model_initialization elapsed_seconds=%.3f model=%s",
+        "research_stage_completed stage=embedding_model_initialization "
+        "elapsed_seconds=%.3f model=%s",
         perf_counter() - started,
         model_name,
     )
@@ -50,7 +53,7 @@ def _load_model(model_name: str):
 
 
 class SentenceTransformerEmbedder:
-    """Load a sentence-transformers model once and return normalized vectors."""
+    """Load one sentence-transformer model and return normalized vectors."""
 
     def __init__(self, model_name: str | None = None) -> None:
         self.model_name = model_name or settings.embedding_model
@@ -63,7 +66,7 @@ class SentenceTransformerEmbedder:
 
         vectors = _load_model(self.model_name).encode(
             list(texts),
-            batch_size=16,
+            batch_size=EMBEDDING_BATCH_SIZE,
             convert_to_numpy=True,
             normalize_embeddings=True,
             show_progress_bar=False,
